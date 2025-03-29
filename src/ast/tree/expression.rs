@@ -419,7 +419,7 @@ impl CodeGen for Expr {
         options: Self::Options,
         symbols: Self::SymbolTable,
     ) -> std::result::Result<TokenStream, Box<dyn std::error::Error>> {
-        let module_name = match ctx.clone() {
+        let _module_name = match ctx.clone() {
             CodeGenContext::Module(name) => name,
             _ => "unknown".to_string(),
         };
@@ -427,7 +427,7 @@ impl CodeGen for Expr {
         match self.value.clone() {
             ExprType::Await(a) => a.to_rust(ctx.clone(), options, symbols),
             ExprType::BinOp(binop) => binop.to_rust(ctx.clone(), options, symbols),
-            ExprType::BoolOp(boolop) => boolop.to_rust(ctx.clone(), options, symbols),
+            ExprType::BoolOp(boolop) => boolop.to_rust(ctx, options, symbols),
             ExprType::Call(call) => call.to_rust(ctx.clone(), options, symbols),
             ExprType::Constant(constant) => constant.to_rust(ctx, options, symbols),
             ExprType::Compare(compare) => compare.to_rust(ctx, options, symbols),
