@@ -1,19 +1,24 @@
-use proc_macro2::TokenStream;
-use pyo3::{FromPyObject, PyAny, PyResult};
-use quote::quote;
+use anyhow::Result;
+use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use proc_macro2::TokenStream;
+use quote::quote;
 
 use crate::{
-    dump, CodeGen, CodeGenContext, Error, ExprType, Node, PythonOptions, SymbolTableScopes,
+    ast::dump::dump,
+    codegen::{CodeGen, CodeGenContext, python_options::PythonOptions},
+    symbols::SymbolTableScopes,
 };
 
+use super::expression::ExprType;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub enum BinOps {
+pub enum Ops {
     Add,
     Sub,
     Mult,
+    MatMult,
     Div,
-    FloorDiv,
     Mod,
     Pow,
     LShift,
@@ -21,12 +26,10 @@ pub enum BinOps {
     BitOr,
     BitXor,
     BitAnd,
-    MatMult,
-
-    Unknown,
+    FloorDiv,
 }
 
-impl<'a> FromPyObject<'a> for BinOps {
+impl<'a> FromPyObject<'a> for Ops {
     fn extract(ob: &'a PyAny) -> PyResult<Self> {
         let err_msg = format!("Unimplemented unary op {}", dump(ob, None)?);
         Err(pyo3::exceptions::PyValueError::new_err(
@@ -37,9 +40,9 @@ impl<'a> FromPyObject<'a> for BinOps {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BinOp {
-    op: BinOps,
-    left: Box<ExprType>,
-    right: Box<ExprType>,
+    pub left: Box<ExprType>,
+    pub op: String,
+    pub right: Box<ExprType>,
 }
 
 impl<'a> FromPyObject<'a> for BinOp {
@@ -53,63 +56,38 @@ impl<'a> FromPyObject<'a> for BinOp {
         let op_type = op.get_type().name().expect(
             ob.error_message(
                 "<unknown>",
-                format!("extracting type name {:?} for binary operator", op),
+                format!("extracting type name {:?} in BinOp", dump(ob, None)),
             )
             .as_str(),
         );
+        log::debug!("op_type: {}", op_type);
 
-        let left = ob.getattr("left").expect(
-            ob.error_message("<unknown>", "error getting binary operand")
-                .as_str(),
-        );
+        let left = ob
+            .getattr("left")
+            .expect(
+                ob.error_message("<unknown>", "error getting unary operator")
+                    .as_str(),
+            )
+            .extract()
+            .expect("3");
+        let right = ob
+            .getattr("right")
+            .expect(
+                ob.error_message("<unknown>", "error getting unary operator")
+                    .as_str(),
+            )
+            .extract()
+            .expect("4");
 
-        let right = ob.getattr("right").expect(
-            ob.error_message("<unknown>", "error getting binary operand")
-                .as_str(),
-        );
-        log::debug!("left: {}, right: {}", dump(left, None)?, dump(right, None)?);
-
-        let op = match op_type.as_ref() {
-            "Add" => BinOps::Add,
-            "Sub" => BinOps::Sub,
-            "Mult" => BinOps::Mult,
-            "Div" => BinOps::Div,
-            "FloorDiv" => BinOps::FloorDiv,
-            "Mod" => BinOps::Mod,
-            "Pow" => BinOps::Pow,
-            "LShift" => BinOps::LShift,
-            "RShift" => BinOps::RShift,
-            "BitOr" => BinOps::BitOr,
-            "BitXor" => BinOps::BitXor,
-            "BitAnd" => BinOps::BitAnd,
-            "MatMult" => BinOps::MatMult,
-
-            _ => {
-                log::debug!("Found unknown BinOp {:?}", op);
-                BinOps::Unknown
-            }
-        };
-
-        log::debug!(
-            "left: {}, right: {}, op: {:?}/{:?}",
-            dump(left, None)?,
-            dump(right, None)?,
-            op_type,
-            op
-        );
-
-        let right = ExprType::extract(right).expect("getting binary operator operand");
-        let left = ExprType::extract(left).expect("getting binary operator operand");
-
-        return Ok(BinOp {
-            op: op,
+        Ok(BinOp {
             left: Box::new(left),
+            op: op_type.to_string(), // Capture the operation type as a string
             right: Box::new(right),
-        });
+        })
     }
 }
 
-impl<'a> CodeGen for BinOp {
+impl CodeGen for BinOp {
     type Context = CodeGenContext;
     type Options = PythonOptions;
     type SymbolTable = SymbolTableScopes;
@@ -119,7 +97,8 @@ impl<'a> CodeGen for BinOp {
         ctx: Self::Context,
         options: Self::Options,
         symbols: Self::SymbolTable,
-    ) -> std::result::Result<TokenStream, Box<dyn std::error::Error>> {
+    ) -> Result<TokenStream> {
+        let op = self.op;
         let left = self
             .left
             .clone()
@@ -128,56 +107,22 @@ impl<'a> CodeGen for BinOp {
             .right
             .clone()
             .to_rust(ctx.clone(), options.clone(), symbols.clone())?;
-        match self.op {
-            BinOps::Add => Ok(quote!((#left) + (#right))),
-            BinOps::Sub => Ok(quote!((#left) - (#right))),
-            BinOps::Mult => Ok(quote!((#left) * (#right))),
-            BinOps::Div => Ok(quote!((#left) as f64 / (#right) as f64)),
-            BinOps::FloorDiv => Ok(quote!((#left) / (#right))),
-            BinOps::Mod => Ok(quote!((#left) % (#right))),
-            BinOps::Pow => Ok(quote!((#left).pow(#right))),
-            BinOps::LShift => Ok(quote!((#left) << (#right))),
-            BinOps::RShift => Ok(quote!((#left) >> (#right))),
-            BinOps::BitOr => Ok(quote!((#left) | (#right))),
-            BinOps::BitXor => Ok(quote!((#left) ^ (#right))),
-            BinOps::BitAnd => Ok(quote!((#left) & (#right))),
-            //MatMult, XXX implement this
-            _ => Err(Error::BinOpNotYetImplemented(self).into()),
+
+        match op.as_str() {
+            "Add" => Ok(quote! { #left + #right }),
+            "Sub" => Ok(quote! { #left - #right }),
+            "Mult" => Ok(quote! { #left * #right }),
+            "Div" => Ok(quote! { #left / #right }),
+            "Mod" => Ok(quote! { #left % #right }),
+            "BitAnd" => Ok(quote! { #left & #right }),
+            "BitOr" => Ok(quote! { #left | #right }),
+            "BitXor" => Ok(quote! { #left ^ #right }),
+            "LShift" => Ok(quote! { #left << #right }),
+            "RShift" => Ok(quote! { #left >> #right }),
+            _ => {
+                let err_msg = format!("Unimplemented binary operator: {}", op);
+                Err(anyhow::anyhow!(err_msg))
+            }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_add() {
-        let options = PythonOptions::default();
-        let result = crate::parse("1 + 2", "test_case.py").unwrap();
-        log::info!("Python tree: {:?}", result);
-        //info!("{}", result);
-
-        let code = result.to_rust(
-            CodeGenContext::Module("test_case".to_string()),
-            options,
-            SymbolTableScopes::new(),
-        );
-        log::info!("module: {:?}", code);
-    }
-
-    #[test]
-    fn test_subtract() {
-        let options = PythonOptions::default();
-        let result = crate::parse("1 - 2", "test_case.py").unwrap();
-        log::info!("Python tree: {:?}", result);
-        //info!("{}", result);
-
-        let code = result.to_rust(
-            CodeGenContext::Module("test_case".to_string()),
-            options,
-            SymbolTableScopes::new(),
-        );
-        log::info!("module: {:?}", code);
     }
 }

@@ -1,83 +1,133 @@
-// This file might become obsolete or significantly changed if List/Tuple
-// are primarily handled within ExprType and don't need their own AST node struct.
-// For now, we'll keep the test file but adapt the test.
+use anyhow::Result;
+use pyo3::prelude::*;
+use serde::{Deserialize, Serialize};
+use proc_macro2::TokenStream;
+use quote::quote;
 
-// Removed unused imports:
-// use proc_macro2::TokenStream;
-// use pyo3::{FromPyObject, PyAny};
-// use quote::quote;
-// use crate::{dump, CodeGen, CodeGenContext, PythonOptions, SymbolTableScopes};
+use crate::{
+    ast::dump::dump,
+    codegen::{CodeGen, CodeGenContext, python_options::PythonOptions},
+    symbols::SymbolTableScopes,
+};
 
-// Removed the List struct and its CodeGen impl as it's handled in ExprType now.
+use super::expression::{ExprType, Expr, Container};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct List {
+    pub elts: Container<ExprType>,
+    pub ctx: Option<String>,
+}
+
+impl<'a> FromPyObject<'a> for List {
+    fn extract(ob: &'a PyAny) -> PyResult<Self> {
+        let elts = ob.getattr("elts").expect("List.elts");
+        let ctx = ob
+            .getattr("ctx")
+            .expect("getting list context")
+            .get_type()
+            .name()
+            .expect(
+                ob.error_message(
+                    "<unknown>",
+                    format!("getting list context {:?}", dump(ob, None)),
+                )
+                .as_str(),
+            );
+
+        Ok(List {
+            elts: elts.extract().expect("List.elts"),
+            ctx: Some(ctx),
+        })
+    }
+}
+
+impl CodeGen for List {
+    type Context = CodeGenContext;
+    type Options = PythonOptions;
+    type SymbolTable = SymbolTableScopes;
+
+    fn to_rust(
+        self,
+        _ctx: Self::Context,
+        _options: Self::Options,
+        _symbols: Self::SymbolTable,
+    ) -> Result<TokenStream> {
+        let elements = self.elts;
+        let element_codes = elements.iter()
+            .map(|element| element.to_rust(_ctx.clone(), _options.clone(), _symbols.clone()))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(quote! { vec![#(#element_codes),*] })
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::tree::{expression::ExprType, statement::StatementType}; // Corrected import paths
-    use crate::parse; // Import parse
-    use test_log::test; // Use test-log macro
+    use pyo3::{Python, types::PyList};
+    use crate::parser::parse;
+    use super::*;
 
     #[test]
-    fn parse_list() {
-        // Parse a Python list expression used as a statement
-        let module = parse("[1, 2, 3]", "list_test.py").expect("Parsing failed");
-        assert_eq!(module.raw.body.len(), 1); // Should be one statement
+    fn test_list_extraction() {
+        Python::with_gil(|py| {
+            let code = "[1, 2, 3]";
+            let module = parse(code, "test_list.py").unwrap();
+            let statement = module.raw.body.get(0).unwrap();
+            if let crate::ast::tree::statement::StatementType::Expr(expr_stmt) = &statement.statement {
+                if let ExprType::List(list) = &expr_stmt.value {
+                    let elements = &list.elts;
+                    assert_eq!(elements.len(), 3);
+                    assert!(matches!(elements.get(0).unwrap(), ExprType::Constant(_)));
+                    assert!(matches!(elements.get(1).unwrap(), ExprType::Constant(_)));
+                    assert!(matches!(elements.get(2).unwrap(), ExprType::Constant(_)));
 
-        let statement = &module.raw.body[0].statement;
-        match statement {
-            // The list literal becomes an Expr statement
-            StatementType::Expr(e) => match &e.value {
-                // The value of the Expr is an ExprType::List
-                ExprType::List(elements) => {
-                    log::debug!("Parsed list elements: {:#?}", elements);
-                    assert_eq!(elements.len(), 3); // Check the number of elements directly on the Vec
-
-                    // Optionally, check the type/value of elements
-                    assert!(matches!(elements[0], ExprType::Constant(_)));
-                    assert!(matches!(elements[1], ExprType::Constant(_)));
-                    assert!(matches!(elements[2], ExprType::Constant(_)));
-
-                    // Example of checking a specific value (requires Constant::to_string or similar)
-                    if let ExprType::Constant(c) = &elements[0] {
-                         assert_eq!(c.to_string(), "1");
-                    } else {
-                         panic!("First element is not a Constant");
+                    if let ExprType::Constant(c) = elements.get(0).unwrap() {
+                        assert_eq!(c.to_string(), "1");
                     }
+                    if let ExprType::Constant(c) = elements.get(1).unwrap() {
+                        assert_eq!(c.to_string(), "2");
+                    }
+                    if let ExprType::Constant(c) = elements.get(2).unwrap() {
+                        assert_eq!(c.to_string(), "3");
+                    }
+                } else {
+                    panic!("Expected ExprType::List, got {:?}", expr_stmt.value);
                 }
-                _ => panic!("Inner expression value is not ExprType::List, found {:?}", e.value),
-            },
-            _ => panic!("Statement is not StatementType::Expr, found {:?}", statement),
-        }
+            } else {
+                panic!("Expected StatementType::Expr");
+            }
+        });
     }
 
+
     #[test]
-    fn parse_tuple() {
-        // Parse a Python tuple expression used as a statement
-        let module = parse("(1, 2, 3)", "tuple_test.py").expect("Parsing failed");
-        assert_eq!(module.raw.body.len(), 1); // Should be one statement
+    fn test_nested_list_extraction() {
+        Python::with_gil(|py| {
+            let code = "[[1, 2, 3], [4, 5, 6], [7, 8, 9]]";
+            let module = parse(code, "test_list.py").unwrap();
+            let statement = module.raw.body.get(0).unwrap();
+            if let crate::ast::tree::statement::StatementType::Expr(expr_stmt) = &statement.statement {
+                if let ExprType::List(list) = &expr_stmt.value {
+                    let elements = &list.elts;
+                    assert_eq!(elements.len(), 3);
+                    assert!(matches!(elements.get(0).unwrap(), ExprType::List(_)));
+                    assert!(matches!(elements.get(1).unwrap(), ExprType::List(_)));
+                    assert!(matches!(elements.get(2).unwrap(), ExprType::List(_)));
 
-        let statement = &module.raw.body[0].statement;
-        match statement {
-            // The tuple literal becomes an Expr statement
-            StatementType::Expr(e) => match &e.value {
-                // The value of the Expr is an ExprType::Tuple
-                ExprType::Tuple(elements) => {
-                    log::debug!("Parsed tuple elements: {:#?}", elements);
-                    assert_eq!(elements.len(), 3); // Check the number of elements directly on the Vec
-
-                    // Optionally, check the type/value of elements
-                    assert!(matches!(elements[0], ExprType::Constant(_)));
-                    assert!(matches!(elements[1], ExprType::Constant(_)));
-                    assert!(matches!(elements[2], ExprType::Constant(_)));
-
-                    if let ExprType::Constant(c) = &elements[0] {
-                         assert_eq!(c.to_string(), "1");
-                    } else {
-                         panic!("First element is not a Constant");
+                    if let ExprType::List(l) = elements.get(0).unwrap() {
+                        assert_eq!(l.elts.len(), 3);
                     }
+                    if let ExprType::List(l) = elements.get(1).unwrap() {
+                        assert_eq!(l.elts.len(), 3);
+                    }
+                    if let ExprType::List(l) = elements.get(2).unwrap() {
+                        assert_eq!(l.elts.len(), 3);
+                    }
+                } else {
+                    panic!("Expected ExprType::List, got {:?}", expr_stmt.value);
                 }
-                _ => panic!("Inner expression value is not ExprType::Tuple, found {:?}", e.value),
-            },
-            _ => panic!("Statement is not StatementType::Expr, found {:?}", statement),
-        }
+            } else {
+                panic!("Expected StatementType::Expr");
+            }
+        });
     }
 }

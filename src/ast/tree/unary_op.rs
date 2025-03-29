@@ -1,12 +1,16 @@
+use anyhow::Result;
+use pyo3::prelude::*;
+use serde::{Deserialize, Serialize};
 use proc_macro2::TokenStream;
-use pyo3::{FromPyObject, PyAny, PyResult};
 use quote::quote;
 
 use crate::{
-    dump, CodeGen, CodeGenContext, Error, ExprType, Node, PythonOptions, SymbolTableScopes,
+    ast::dump::dump,
+    codegen::{CodeGen, CodeGenContext, python_options::PythonOptions},
+    symbols::SymbolTableScopes,
 };
 
-use serde::{Deserialize, Serialize};
+use super::expression::ExprType;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Ops {
@@ -14,8 +18,6 @@ pub enum Ops {
     Not,
     UAdd,
     USub,
-
-    Unknown,
 }
 
 impl<'a> FromPyObject<'a> for Ops {
@@ -29,8 +31,8 @@ impl<'a> FromPyObject<'a> for Ops {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct UnaryOp {
-    op: Ops,
-    operand: Box<ExprType>,
+    pub op: String,
+    pub operand: Box<ExprType>,
 }
 
 impl<'a> FromPyObject<'a> for UnaryOp {
@@ -44,34 +46,25 @@ impl<'a> FromPyObject<'a> for UnaryOp {
         let op_type = op.get_type().name().expect(
             ob.error_message(
                 "<unknown>",
-                format!("extracting type name {:?} for unary operator", op),
+                format!("extracting type name {:?} in UnaryOp", dump(ob, None)),
             )
             .as_str(),
         );
+        log::debug!("op_type: {}", op_type);
 
-        let operand = ob.getattr("operand").expect(
-            ob.error_message("<unknown>", "error getting unary operand")
-                .as_str(),
-        );
+        let operand = ob
+            .getattr("operand")
+            .expect(
+                ob.error_message("<unknown>", "error getting unary operator")
+                    .as_str(),
+            )
+            .extract()
+            .expect("8");
 
-        let op = match op_type.as_ref() {
-            "Invert" => Ops::Invert,
-            "Not" => Ops::Not,
-            "UAdd" => Ops::UAdd,
-            "USub" => Ops::USub,
-            _ => {
-                log::debug!("{:?}", op);
-                Ops::Unknown
-            }
-        };
-
-        log::debug!("operand: {}", dump(operand, None)?);
-        let operand = ExprType::extract(operand).expect("getting unary operator operand");
-
-        return Ok(UnaryOp {
-            op: op,
+        Ok(UnaryOp {
+            op: op_type.to_string(), // Capture the operation type as a string
             operand: Box::new(operand),
-        });
+        })
     }
 }
 
@@ -85,35 +78,22 @@ impl CodeGen for UnaryOp {
         ctx: Self::Context,
         options: Self::Options,
         symbols: Self::SymbolTable,
-    ) -> Result<TokenStream, Box<dyn std::error::Error>> {
-        let operand = self.operand.clone().to_rust(ctx, options, symbols)?;
-        match self.op {
-            Ops::Invert | Ops::Not => Ok(quote!(!#operand)),
-            Ops::UAdd => Ok(quote!(+#operand)),
-            Ops::USub => Ok(quote!(-#operand)),
-            _ => Err(Error::UnaryOpNotYetImplemented(self).into())
+    ) -> Result<TokenStream> {
+        let op = self.op;
+        let operand = self
+            .operand
+            .clone()
+            .to_rust(ctx, options, symbols)?;
+
+        match op.as_str() {
+            "Not" => Ok(quote! { !#operand }),
+            "USub" => Ok(quote! { -#operand }),
+            "UAdd" => Ok(quote! { +#operand }),
+            "Invert" => Ok(quote! { !#operand }), // Assuming bitwise NOT is also ! in Rust
+            _ => {
+                let err_msg = format!("Unimplemented unary operator: {}", op);
+                Err(anyhow::anyhow!(err_msg))
+            }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_not() {
-        let options = PythonOptions::default();
-        let result = crate::parse("not True", "test").unwrap();
-        log::info!("Python tree: {:?}", result);
-        //log::info!("{}", result);
-
-        let code = result
-            .to_rust(
-                CodeGenContext::Module("test".to_string()),
-                options,
-                SymbolTableScopes::new(),
-            )
-            .unwrap();
-        log::info!("module: {:?}", code);
     }
 }

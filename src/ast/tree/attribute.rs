@@ -1,17 +1,22 @@
-use proc_macro2::TokenStream;
-use pyo3::FromPyObject;
-use quote::{format_ident, quote};
-
-use crate::{dump, CodeGen, CodeGenContext, ExprType, Node, PythonOptions, SymbolTableScopes};
-
+use anyhow::Result;
+use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use proc_macro2::TokenStream;
+use quote::quote;
+
+use crate::{
+    ast::dump::dump,
+    codegen::{CodeGen, CodeGenContext, python_options::PythonOptions},
+    symbols::SymbolTableScopes,
+};
+
+use super::expression::ExprType;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-//#[pyo3(transparent)]
 pub struct Attribute {
-    value: Box<ExprType>,
-    attr: String,
-    ctx: String,
+    pub value: Box<ExprType>,
+    pub attr: String,
+    pub ctx: Option<String>,
 }
 
 impl<'a> FromPyObject<'a> for Attribute {
@@ -26,19 +31,20 @@ impl<'a> FromPyObject<'a> for Attribute {
             .expect(
                 ob.error_message(
                     "<unknown>",
-                    format!("extracting type name {:?} in attribute", dump(ob, None)),
+                    format!("getting attribute context {:?}", dump(ob, None)),
                 )
                 .as_str(),
             );
+
         Ok(Attribute {
             value: Box::new(ExprType::extract(&value).expect("Attribute.value")),
             attr: attr.extract().expect("Attribute.attr"),
-            ctx: ctx.to_string(),
+            ctx: Some(ctx),
         })
     }
 }
 
-impl<'a> CodeGen for Attribute {
+impl CodeGen for Attribute {
     type Context = CodeGenContext;
     type Options = PythonOptions;
     type SymbolTable = SymbolTableScopes;
@@ -48,12 +54,11 @@ impl<'a> CodeGen for Attribute {
         _ctx: Self::Context,
         _options: Self::Options,
         _symbols: Self::SymbolTable,
-    ) -> Result<TokenStream, Box<dyn std::error::Error>> {
+    ) -> Result<TokenStream> {
         let name = self
             .value
-            .to_rust(_ctx, _options, _symbols)
-            .expect("Attribute.value");
-        let attr = format_ident!("{}", self.attr);
-        Ok(quote!(#name.#attr))
+            .to_rust(_ctx, _options, _symbols)?;
+        let attr = self.attr;
+        Ok(quote! { #name.#attr })
     }
 }

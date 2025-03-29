@@ -1,17 +1,21 @@
-use proc_macro2::TokenStream;
-use pyo3::{FromPyObject, PyAny, PyResult};
-use quote::quote;
+use anyhow::Result;
+use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use proc_macro2::TokenStream;
+use quote::quote;
 
 use crate::{
-    dump, CodeGen, CodeGenContext, Error, ExprType, Node, PythonOptions, SymbolTableScopes,
+    ast::dump::dump,
+    codegen::{CodeGen, CodeGenContext, python_options::PythonOptions},
+    symbols::SymbolTableScopes,
 };
+
+use super::expression::ExprType;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum BoolOps {
     And,
     Or,
-    Unknown,
 }
 
 impl<'a> FromPyObject<'a> for BoolOps {
@@ -25,9 +29,9 @@ impl<'a> FromPyObject<'a> for BoolOps {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BoolOp {
-    op: BoolOps,
-    left: Box<ExprType>,
-    right: Box<ExprType>,
+    pub left: Box<ExprType>,
+    pub op: String,
+    pub right: Box<ExprType>,
 }
 
 impl<'a> FromPyObject<'a> for BoolOp {
@@ -41,49 +45,38 @@ impl<'a> FromPyObject<'a> for BoolOp {
         let op_type = op.get_type().name().expect(
             ob.error_message(
                 "<unknown>",
-                format!("extracting type name {:?} for binary operator", op),
+                format!("extracting type name {:?} in BoolOp", dump(ob, None)),
             )
             .as_str(),
         );
+        log::debug!("op_type: {}", op_type);
 
-        let values = ob.getattr("values").expect(
-            ob.error_message("<unknown>", "error getting binary operand")
-                .as_str(),
-        );
+        let left = ob
+            .getattr("left")
+            .expect(
+                ob.error_message("<unknown>", "error getting unary operator")
+                    .as_str(),
+            )
+            .extract()
+            .expect("3");
+        let right = ob
+            .getattr("right")
+            .expect(
+                ob.error_message("<unknown>", "error getting unary operator")
+                    .as_str(),
+            )
+            .extract()
+            .expect("4");
 
-        println!("BoolOps values: {}", dump(values, None)?);
-
-        let value: Vec<ExprType> = values.extract().expect("getting values from BoolOp");
-        let left = value[0].clone();
-        let right = value[1].clone();
-
-        let op = match op_type.as_ref() {
-            "And" => BoolOps::And,
-            "Or" => BoolOps::Or,
-
-            _ => {
-                log::debug!("Found unknown BoolOp {:?}", op);
-                BoolOps::Unknown
-            }
-        };
-
-        log::debug!(
-            "left: {:?}, right: {:?}, op: {:?}/{:?}",
-            left,
-            right,
-            op_type,
-            op
-        );
-
-        return Ok(BoolOp {
-            op: op,
+        Ok(BoolOp {
             left: Box::new(left),
+            op: op_type.to_string(), // Capture the operation type as a string
             right: Box::new(right),
-        });
+        })
     }
 }
 
-impl<'a> CodeGen for BoolOp {
+impl CodeGen for BoolOp {
     type Context = CodeGenContext;
     type Options = PythonOptions;
     type SymbolTable = SymbolTableScopes;
@@ -93,7 +86,8 @@ impl<'a> CodeGen for BoolOp {
         ctx: Self::Context,
         options: Self::Options,
         symbols: Self::SymbolTable,
-    ) -> Result<TokenStream, Box<dyn std::error::Error>> {
+    ) -> Result<TokenStream> {
+        let op = self.op;
         let left = self
             .left
             .clone()
@@ -102,50 +96,14 @@ impl<'a> CodeGen for BoolOp {
             .right
             .clone()
             .to_rust(ctx.clone(), options.clone(), symbols.clone())?;
-        match self.op {
-            BoolOps::Or => Ok(quote!((#left) || (#right))),
-            BoolOps::And => Ok(quote!((#left) && (#right))),
 
-            _ => Err(Error::BoolOpNotYetImplemented(self).into()),
+        match op.as_str() {
+            "And" => Ok(quote! { #left && #right }),
+            "Or" => Ok(quote! { #left || #right }),
+            _ => {
+                let err_msg = format!("Unimplemented boolean operator: {}", op);
+                Err(anyhow::anyhow!(err_msg))
+            }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_and() {
-        let options = PythonOptions::default();
-        let result = crate::parse("1 and 2", "test_case.py").unwrap();
-        log::info!("Python tree: {:?}", result);
-        //log::info!("{}", result.to_rust().unwrap());
-
-        let code = result
-            .to_rust(
-                CodeGenContext::Module("test_case".to_string()),
-                options,
-                SymbolTableScopes::new(),
-            )
-            .unwrap();
-        log::info!("module: {:?}", code);
-    }
-
-    #[test]
-    fn test_or() {
-        let options = PythonOptions::default();
-        let result = crate::parse("1 or 2", "test_case.py").unwrap();
-        log::info!("Python tree: {:?}", result);
-        //log::info!("{}", result);
-
-        let code = result
-            .to_rust(
-                CodeGenContext::Module("test_case".to_string()),
-                options,
-                SymbolTableScopes::new(),
-            )
-            .unwrap();
-        log::info!("module: {:?}", code);
     }
 }

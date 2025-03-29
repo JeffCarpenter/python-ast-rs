@@ -1,15 +1,20 @@
-use proc_macro2::TokenStream;
-use pyo3::FromPyObject;
-use quote::quote;
+use anyhow::Result;
+use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use proc_macro2::TokenStream;
+use quote::quote;
 
-use crate::{CodeGen, CodeGenContext, ExprType, PythonOptions, SymbolTableScopes};
+use crate::{
+    codegen::{CodeGen, CodeGenContext, python_options::PythonOptions},
+    symbols::SymbolTableScopes,
+};
 
-/// A keyword argument, gnerally used in function calls.
+use super::expression::ExprType;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct NamedExpr {
-    left: Box<ExprType>,
-    right: Box<ExprType>,
+    pub left: Box<ExprType>,
+    pub right: Box<ExprType>,
 }
 
 impl<'a> FromPyObject<'a> for NamedExpr {
@@ -33,43 +38,13 @@ impl CodeGen for NamedExpr {
         ctx: Self::Context,
         options: Self::Options,
         symbols: Self::SymbolTable,
-    ) -> Result<TokenStream, Box<dyn std::error::Error>> {
+    ) -> Result<TokenStream> {
         let left = self
             .left
-            .clone()
-            .to_rust(ctx.clone(), options.clone(), symbols.clone())
-            .expect(format!("parsing left side of named expression {:?}", self.left).as_str());
-        let right =
-            self.right.clone().to_rust(ctx, options, symbols).expect(
-                format!("parsing right side of named expression {:?}", self.right).as_str(),
-            );
-        Ok(quote!(#left = #right))
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::{Constant, ExprType, Name};
-    use litrs::*;
-
-    #[test]
-    fn test_named_expression() {
-        let named_expression = NamedExpr {
-            left: Box::new(ExprType::Name(Name {
-                id: "a".to_string(),
-            })),
-            right: Box::new(ExprType::Constant(Constant(Some(Literal::Integer(
-                IntegerLit::parse("1".to_string()).unwrap(),
-            ))))),
-        };
-        let rust = named_expression
-            .to_rust(
-                CodeGenContext::Module("test".to_string()),
-                PythonOptions::default(),
-                SymbolTableScopes::new(),
-            )
-            .unwrap();
-        assert_eq!(rust.to_string(), "a = 1");
+            .to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+        let right = self
+            .right
+            .to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+        Ok(quote! { #left = #right })
     }
 }

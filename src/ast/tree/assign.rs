@@ -1,12 +1,16 @@
-use proc_macro2::TokenStream;
-use pyo3::{FromPyObject, PyAny, PyResult};
-use quote::{format_ident, quote};
+use anyhow::Result;
+use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use proc_macro2::TokenStream;
+use quote::quote;
 
 use crate::{
-    CodeGen, CodeGenContext, ExprType, Name, Node, PythonOptions, SymbolTableNode,
-    SymbolTableScopes,
+    ast::dump::dump,
+    codegen::{CodeGen, CodeGenContext, python_options::PythonOptions},
+    symbols::{SymbolTableScopes, SymbolTableNode},
 };
+
+use super::{expression::{ExprType, Expr}, name::Name};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Assign {
@@ -26,25 +30,24 @@ impl<'a> FromPyObject<'a> for Assign {
             .extract()
             .expect("1");
 
-        let python_value = ob.getattr("value").expect(
-            ob.error_message("<unknown>", "assignment statement value not found")
-                .as_str(),
-        );
-
-        let value = ExprType::extract(python_value).expect(
-            ob.error_message("<unknown>", "error getting value of assignment statement")
-                .as_str(),
-        );
+        let value = ob
+            .getattr("value")
+            .expect(
+                ob.error_message("<unknown>", "error getting unary operator")
+                    .as_str(),
+            )
+            .extract()
+            .expect("2");
 
         Ok(Assign {
-            targets: targets,
-            value: value,
+            targets,
+            value,
             type_comment: None,
         })
     }
 }
 
-impl<'a> CodeGen for Assign {
+impl CodeGen for Assign {
     type Context = CodeGenContext;
     type Options = PythonOptions;
     type SymbolTable = SymbolTableScopes;
@@ -70,13 +73,13 @@ impl<'a> CodeGen for Assign {
         ctx: Self::Context,
         options: Self::Options,
         symbols: Self::SymbolTable,
-    ) -> Result<TokenStream, Box<dyn std::error::Error>> {
-        let mut stream = TokenStream::new();
-        for target in self.targets.into_iter().map(|n| n.id) {
-            let ident = format_ident!("{}", target);
-            stream.extend(quote!(#ident));
+    ) -> Result<TokenStream> {
+        let mut code = Vec::new();
+        for target in self.targets {
+            let target_str = target.id;
+            let value = self.value.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+            code.push(quote! { let #target_str = #value; });
         }
-        let value = self.value.to_rust(ctx, options, symbols)?;
-        Ok(quote!(#stream = #value))
+        Ok(quote! { #(#code)* })
     }
 }

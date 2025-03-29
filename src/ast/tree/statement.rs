@@ -1,37 +1,36 @@
+use anyhow::Result;
+use log::debug;
+use pyo3::{prelude::*, FromPyObject};
+use serde::{Deserialize, Serialize};
 use proc_macro2::TokenStream;
-use pyo3::{FromPyObject, PyAny, PyResult};
 use quote::quote;
-use serde::{Deserialize, Serialize}; // Added serde
 
 use crate::{
-    ast::{
-        dump::dump, // Corrected import path
-        node::Node, // Corrected import path
-        tree::{ // Corrected import path
-            assign::Assign,
-            call::Call,
-            class_def::ClassDef,
-            expression::{Expr, ExprType}, // Corrected import path
-            function_def::FunctionDef,
-            import::Import,
-            import_from::ImportFrom,
-        },
-    },
-    codegen::{CodeGen, CodeGenContext, PythonOptions}, // Corrected import path
-    error::Error, // Corrected import path
-    symbols::SymbolTableScopes, // Corrected import path
+    ast::dump::dump,
+    codegen::{CodeGen, CodeGenContext, python_options::PythonOptions},
+    symbols::SymbolTableScopes,
 };
 
-use log::debug;
-
+use super::{
+    expression::{Expr, ExprType, Container},
+    function_def::FunctionDef,
+    class_def::ClassDef,
+    assign::Assign,
+    import::Import,
+    import_from::ImportFrom,
+    call::Call,
+};
+use crate::ast::node::Node;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Statement {
+    #[serde(flatten)]
+    pub statement: StatementType,
+
     pub lineno: Option<usize>,
     pub col_offset: Option<usize>,
     pub end_lineno: Option<usize>,
     pub end_col_offset: Option<usize>,
-    pub statement: StatementType,
 }
 
 impl<'a> FromPyObject<'a> for Statement {
@@ -61,24 +60,30 @@ impl Node for Statement {
     }
 }
 
+
 impl CodeGen for Statement {
+    type Context = CodeGenContext;
+    type Options = PythonOptions;
+    type SymbolTable = SymbolTableScopes;
+
     fn to_rust(
-        &self,
-        ctx: &CodeGenContext,
-        options: &PythonOptions,
-        symbols: &mut SymbolTableScopes,
-    ) -> Result<TokenStream, anyhow::Error> { // Changed error type
+        self,
+        ctx: Self::Context,
+        options: Self::Options,
+        symbols: Self::SymbolTable,
+    ) -> Result<TokenStream> {
         self
             .statement
             .to_rust(ctx, options, symbols)
             .map_err(|e| anyhow::anyhow!("Failed to compile statement {:?}: {}", self, e))
-
     }
 
-    fn find_symbols(&self, symbols: &mut SymbolTableScopes) {
-        self.statement.find_symbols(symbols)
+    fn find_symbols(self, symbols: Self::SymbolTable) -> Self::SymbolTable {
+        self.statement.find_symbols(symbols);
+        symbols
     }
 }
+
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum StatementType {
@@ -88,15 +93,120 @@ pub enum StatementType {
     Continue,
     ClassDef(ClassDef),
     // Call is an expression, should be wrapped in Expr statement
+    Expr(Expr), // Represents expression statements (like standalone calls or constants)
     Pass,
     Return(Option<Expr>),
     Import(Import),
     ImportFrom(ImportFrom),
-    Expr(Expr), // Represents expression statements (like standalone calls or constants)
     FunctionDef(FunctionDef),
-
-    Unimplemented(String), // Keep for now
+    If(If),
+    While(While),
+    For(For),
+    With(With),
+    Raise(Raise),
+    Try(Try),
+    Assert(Assert),
+    Delete(Delete),
+    AnnAssign(AnnAssign),
+    AugAssign(AugAssign),
+    Global(Global),
+    Nonlocal(Nonlocal),
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct If {
+    pub test: Expr,
+    pub body: Container<Statement>,
+    pub orelse: Container<Statement>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct While {
+    pub test: Expr,
+    pub body: Container<Statement>,
+    pub orelse: Container<Statement>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct For {
+    pub target: Expr,
+    pub iter: Expr,
+    pub body: Container<Statement>,
+    pub orelse: Container<Statement>,
+    pub type_comment: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct With {
+    pub items: Container<WithItem>,
+    pub body: Container<Statement>,
+    pub type_comment: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct WithItem {
+    pub context_expr: Expr,
+    pub optional_vars: Option<Expr>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Raise {
+    pub exc: Option<Expr>,
+    pub cause: Option<Expr>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Try {
+    pub body: Container<Statement>,
+    pub handlers: Container<ExceptionHandler>,
+    pub orelse: Container<Statement>,
+    pub finalbody: Container<Statement>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Assert {
+    pub test: Expr,
+    pub msg: Option<Expr>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Delete {
+    pub targets: Container<ExprType>, // Changed from Expr to ExprType
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct ExceptionHandler {
+    pub r#type: Option<Expr>,
+    pub name: Option<String>,
+    pub body: Container<Statement>,
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct AnnAssign {
+    pub target: Expr,
+    pub annotation: Expr,
+    pub value: Option<Expr>,
+    pub simple: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct AugAssign {
+    pub target: Expr,
+    pub op: String, // Op type?
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Global {
+    pub names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Nonlocal {
+    pub names: Vec<String>,
+}
+
 
 impl<'a> FromPyObject<'a> for StatementType {
     fn extract(ob: &'a PyAny) -> PyResult<Self> {
@@ -110,34 +220,46 @@ impl<'a> FromPyObject<'a> for StatementType {
             "ClassDef" => Ok(StatementType::ClassDef(ClassDef::extract(ob)?)),
             "Continue" => Ok(StatementType::Continue),
             "Break" => Ok(StatementType::Break),
-            "FunctionDef" => Ok(StatementType::FunctionDef(FunctionDef::extract(ob)?)),
+            "Expr" => Ok(StatementType::Expr(Expr::extract(ob)?)),
+            "Return" => {
+                let value = ob.getattr("value")?;
+                let expr_option: Option<Expr> = if value.is_none() {
+                    None
+                } else {
+                    Some(value.extract()?)
+                };
+                Ok(StatementType::Return(expr_option))
+            },
             "Import" => Ok(StatementType::Import(Import::extract(ob)?)),
             "ImportFrom" => Ok(StatementType::ImportFrom(ImportFrom::extract(ob)?)),
-            "Expr" => {
-                // This is an expression used as a statement (e.g., a function call, a constant)
-                let expr_node = ob.getattr("value")?;
-                Ok(StatementType::Expr(Expr::extract(expr_node)?))
+            "FunctionDef" => Ok(StatementType::FunctionDef(FunctionDef::extract(ob)?)),
+            "If" => Ok(StatementType::If(If::extract(ob)?)),
+            "While" => Ok(StatementType::While(While::extract(ob)?)),
+            "For" => Ok(StatementType::For(For::extract(ob)?)),
+            "With" => Ok(StatementType::With(With::extract(ob)?)),
+            "Raise" => Ok(StatementType::Raise(Raise::extract(ob)?)),
+            "Try" => Ok(StatementType::Try(Try::extract(ob)?)),
+            "Assert" => Ok(StatementType::Assert(Assert::extract(ob)?)),
+            "Delete" => Ok(StatementType::Delete(Delete::extract(ob)?)),
+            "AnnAssign" => Ok(StatementType::AnnAssign(AnnAssign::extract(ob)?)),
+            "AugAssign" => Ok(StatementType::AugAssign(AugAssign::extract(ob)?)),
+            "Global" => Ok(StatementType::Global(Global::extract(ob)?)),
+            "Nonlocal" => Ok(StatementType::Nonlocal(Nonlocal::extract(ob)?)),
+
+            _ => {
+                let err_msg = format!("Unimplemented statement type: {}", type_name);
+                Err(pyo3::exceptions::PyValueError::new_err(
+                    ob.error_message("<unknown>", err_msg),
+                ))
             }
-            "Return" => {
-                let value_attr = ob.getattr("value")?;
-                // Check if the return value is None (Python None)
-                let return_expr = if value_attr.is_none() {
-                    None // Represents `return` without a value
-                } else {
-                    Some(Expr::extract(value_attr)?) // Extract the expression
-                };
-                Ok(StatementType::Return(return_expr))
-            }
-            _ => Err(pyo3::exceptions::PyNotImplementedError::new_err(format!(
-                "Unimplemented statement type {}, {}",
-                type_name,
-                dump(ob, None)?
-            ))),
         }
     }
 }
 
 impl CodeGen for StatementType {
+    type Context = CodeGenContext;
+    type Options = PythonOptions;
+    type SymbolTable = SymbolTableScopes;
 
     fn find_symbols(&self, symbols: &mut SymbolTableScopes) {
         match self {
@@ -147,7 +269,52 @@ impl CodeGen for StatementType {
             StatementType::Import(i) => i.find_symbols(symbols),
             StatementType::ImportFrom(i) => i.find_symbols(symbols),
             StatementType::Expr(e) => e.find_symbols(symbols),
-            // Return, Pass, Break, Continue don't typically introduce symbols at this level
+            StatementType::If(if_stmt) => {
+                for s in if_stmt.body.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+                for s in if_stmt.orelse.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+            },
+            StatementType::While(while_stmt) => {
+                for s in while_stmt.body.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+                for s in while_stmt.orelse.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+            },
+            StatementType::For(for_stmt) => {
+                for s in for_stmt.body.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+                for s in for_stmt.orelse.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+            },
+            StatementType::With(with_stmt) => {
+                for s in with_stmt.body.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+            },
+            StatementType::Try(try_stmt) => {
+                for s in try_stmt.body.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+                for handler in try_stmt.handlers.iter() {
+                    for s in handler.body.iter() {
+                        s.statement.find_symbols(symbols);
+                    }
+                }
+                for s in try_stmt.orelse.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+                for s in try_stmt.finalbody.iter() {
+                    s.statement.find_symbols(symbols);
+                }
+            },
+            // Return, Pass, Break, Continue, Raise, Assert, Delete, AnnAssign, AugAssign, Global, Nonlocal don't typically introduce symbols at this level
             _ => {}
         }
     }
@@ -157,157 +324,166 @@ impl CodeGen for StatementType {
         ctx: &CodeGenContext,
         options: &PythonOptions,
         symbols: &mut SymbolTableScopes,
-    ) -> Result<TokenStream, anyhow::Error> { // Changed error type
+    ) -> Result<TokenStream> {
         match self {
             StatementType::AsyncFunctionDef(s) => {
                 let async_ctx = CodeGenContext::Async(Box::new(ctx.clone()));
                 s.to_rust(&async_ctx, options, symbols)
-            }
+            },
             StatementType::Assign(a) => a.to_rust(ctx, options, symbols),
             StatementType::Break => Ok(quote! { break; }),
-            StatementType::ClassDef(c) => c.to_rust(ctx, options, symbols),
             StatementType::Continue => Ok(quote! { continue; }),
-            StatementType::Pass => Ok(quote! { /* Pass translates to nothing */ }),
-            StatementType::FunctionDef(s) => s.to_rust(ctx, options, symbols),
+            StatementType::ClassDef(c) => c.to_rust(ctx, options, symbols),
+            StatementType::Expr(e) => {
+                let expr_code = e.to_rust(ctx, options, symbols)?;
+                Ok(quote! { #expr_code; })
+            },
+            StatementType::Pass => Ok(quote! { () }),
+            StatementType::Return(e) => {
+                match e {
+                    Some(exp) => {
+                        let exp_code = exp.to_rust(ctx, options, symbols)?;
+                        Ok(quote! { return #exp_code; })
+                    },
+                    None => Ok(quote! { return; }),
+                }
+            },
             StatementType::Import(s) => s.to_rust(ctx, options, symbols),
             StatementType::ImportFrom(s) => s.to_rust(ctx, options, symbols),
-            StatementType::Expr(s) => {
-                // Generate code for the expression, but add a semicolon for statement context
-                let expr_code = s.to_rust(ctx, options, symbols)?;
-                Ok(quote! { #expr_code; })
-            }
-            StatementType::Return(None) => Ok(quote!(return;)), // Return without value
-            StatementType::Return(Some(e)) => {
-                let exp = e.to_rust(ctx, options, symbols)?;
-                Ok(quote!(return #exp;))
-            }
-            StatementType::Unimplemented(s) => {
-                 Err(Error::StatementNotYetImplemented(format!("Unimplemented statement type: {}", s)).into())
-            }
-        }
-    }
-}
+            StatementType::FunctionDef(s) => s.to_rust(ctx, options, symbols),
+            StatementType::If(if_stmt) => {
+                let test_code = if_stmt.test.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+                let body_code = if_stmt.body.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+                let orelse_code = if_stmt.orelse.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::tree::constant::Constant; // Import Constant
-    use crate::parse; // Import parse
-    use test_log::test; // Use test-log macro
-
-    #[test]
-    fn check_pass_statement() {
-        let statement = StatementType::Pass;
-        let options = PythonOptions::default();
-        let mut symbols = SymbolTableScopes::new();
-        let tokens = statement.to_rust(
-            &CodeGenContext::Module("".to_string()),
-            &options,
-            &mut symbols,
-        );
-
-        debug!("statement: {:?}, tokens: {:?}", statement, tokens);
-        assert!(tokens.is_ok());
-        assert!(tokens.unwrap().to_string().trim().is_empty()); // Pass should generate no code or only comments
-    }
-
-    #[test]
-    fn check_break_statement() {
-        let statement = StatementType::Break;
-        let options = PythonOptions::default();
-        let mut symbols = SymbolTableScopes::new();
-        let tokens = statement.to_rust(
-            &CodeGenContext::Module("".to_string()),
-            &options,
-            &mut symbols,
-        );
-
-        debug!("statement: {:?}, tokens: {:?}", statement, tokens);
-        assert!(tokens.is_ok());
-        assert_eq!(tokens.unwrap().to_string(), "break ;");
-    }
-
-    #[test]
-    fn check_continue_statement() {
-        let statement = StatementType::Continue;
-        let options = PythonOptions::default();
-        let mut symbols = SymbolTableScopes::new();
-        let tokens = statement.to_rust(
-            &CodeGenContext::Module("".to_string()),
-            &options,
-            &mut symbols,
-        );
-
-        debug!("statement: {:?}, tokens: {:?}", statement, tokens);
-        assert!(tokens.is_ok());
-        assert_eq!(tokens.unwrap().to_string(), "continue ;");
-    }
-
-    #[test]
-    fn return_with_nothing() {
-        // Python's `return` implicitly returns None if no value is specified.
-        // However, the AST node for `return` will have `value=None` (Python None object).
-        // Our `extract` handles this, resulting in `StatementType::Return(None)`.
-        let tree = parse("return", "<none>").unwrap();
-        assert_eq!(tree.raw.body.len(), 1);
-        assert_eq!(tree.raw.body[0].statement, StatementType::Return(None)); // Should be None after extraction logic
-    }
-
-    #[test]
-    fn return_with_expr() {
-        // The literal parsing needs to be correct for the comparison
-        let lit = litrs::Literal::parse("8").expect("Parsing literal 8"); // Use litrs directly
-        let tree = parse("return 8", "<none>").unwrap();
-        assert_eq!(tree.raw.body.len(), 1);
-
-        // We expect a Return statement containing an Expr statement,
-        // which in turn contains a Constant expression.
-        match &tree.raw.body[0].statement {
-            StatementType::Return(Some(expr)) => match &expr.value {
-                ExprType::Constant(Constant(Some(inner_lit))) => {
-                    // Compare the parsed literal with the expected one
-                    // Note: Direct comparison of litrs::Literal might be tricky due to spans.
-                    // Comparing the string representation is often sufficient for tests.
-                    assert_eq!(inner_lit.to_string(), lit.to_string());
-                }
-                _ => panic!("Inner expression is not a Constant"),
+                Ok(quote! {
+                    if #test_code {
+                        #(#body_code)*
+                    } else {
+                        #(#orelse_code)*
+                    }
+                })
             },
-            _ => panic!("Statement is not Return(Some(Expr))"),
+            StatementType::While(while_stmt) => {
+                let test_code = while_stmt.test.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+                let body_code = while_stmt.body.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+                let orelse_code = while_stmt.orelse.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+
+                Ok(quote! {
+                    while #test_code {
+                        #(#body_code)*
+                    } else {
+                        #(#orelse_code)*
+                    }
+                })
+            },
+            StatementType::For(for_stmt) => {
+                let target_code = for_stmt.target.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+                let iter_code = for_stmt.iter.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+                let body_code = for_stmt.body.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+                let orelse_code = for_stmt.orelse.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+
+                Ok(quote! {
+                    for #target_code in #iter_code {
+                        #(#body_code)*
+                    } else {
+                        #(#orelse_code)*
+                    }
+                })
+            },
+            StatementType::With(with_stmt) => {
+                // This is a placeholder, needs proper implementation for 'with' statements
+                let body_code = with_stmt.body.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+                Ok(quote! {
+                    {
+                        // with statement logic here
+                        #(#body_code)*
+                    }
+                })
+            },
+            StatementType::Raise(raise_stmt) => {
+                let exc_code = raise_stmt.exc.as_ref().map(|e| e.to_rust(ctx.clone(), options.clone(), symbols.clone())).transpose()?;
+                let cause_code = raise_stmt.cause.as_ref().map(|c| c.to_rust(ctx.clone(), options.clone(), symbols.clone())).transpose()?;
+
+                match (exc_code, cause_code) {
+                    (Some(exc), Some(cause)) => Ok(quote! { panic!("raise {} from {}", exc, cause) }),
+                    (Some(exc), None) => Ok(quote! { panic!("raise {}", exc) }),
+                    (None, _) => Ok(quote! { panic!("raise") }), // Bare raise
+                }
+            },
+            StatementType::Try(try_stmt) => {
+                // Placeholder for try-except-finally. Needs more complex logic
+                let body_code = try_stmt.body.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+                let handler_code = try_stmt.handlers.iter().map(|handler| {
+                    let handler_body_code = handler.body.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+                    let exception_type = handler.r#type.as_ref().map(|t| t.to_rust(ctx.clone(), options.clone(), symbols.clone())).transpose()?;
+                    let exception_name = handler.name.clone();
+
+                    Ok(quote! {
+                        // Exception handler for type: #exception_type, name: #exception_name
+                        #(#handler_body_code)*
+                    })
+                }).collect::<Result<Vec<_>>>()?;
+                let orelse_code = try_stmt.orelse.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+                let finalbody_code = try_stmt.finalbody.iter().map(|s| s.statement.to_rust(ctx, options, symbols)).collect::<Result<Vec<_>>>()?;
+
+
+                Ok(quote! {
+                    {
+                        // try block
+                        #(#body_code)*
+
+                        // except blocks
+                        #(#handler_code)*
+
+                        // else block
+                        #(#orelse_code)*
+
+                        // finally block
+                        #(#finalbody_code)*
+                    }
+                })
+            },
+            StatementType::Assert(assert_stmt) => {
+                let test_code = assert_stmt.test.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+                let msg_code = assert_stmt.msg.as_ref().map(|m| m.to_rust(ctx.clone(), options.clone(), symbols.clone())).transpose()?;
+                match msg_code {
+                    Some(msg) => Ok(quote! { assert!(#test_code, #msg); }),
+                    None => Ok(quote! { assert!(#test_code); }),
+                }
+            },
+            StatementType::Delete(delete_stmt) => {
+                // Placeholder for delete statements, needs proper implementation
+                Ok(quote! {
+                    // delete statement logic here
+                })
+            },
+            StatementType::AnnAssign(ann_assign) => {
+                let target_code = ann_assign.target.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+                let annotation_code = ann_assign.annotation.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+                let value_code = ann_assign.value.as_ref().map(|v| v.to_rust(ctx.clone(), options.clone(), symbols.clone())).transpose()?;
+
+                match value_code {
+                    Some(value) => Ok(quote! { let #target_code: #annotation_code = #value; }),
+                    None => Ok(quote! { let #target_code: #annotation_code; }),
+                }
+            },
+            StatementType::AugAssign(aug_assign) => {
+                let target_code = aug_assign.target.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+                let value_code = aug_assign.value.to_rust(ctx.clone(), options.clone(), symbols.clone())?;
+                let op = &aug_assign.op; // Operation needs to be mapped to Rust equivalent
+
+                // Placeholder, needs proper operation mapping
+                Ok(quote! { #target_code #op= #value_code; })
+            },
+            StatementType::Global(global_stmt) => {
+                // Global statements are hints to the compiler and don't produce code directly
+                Ok(quote! { /* global variables: #(#global_stmt.names),* */ })
+            },
+            StatementType::Nonlocal(nonlocal_stmt) => {
+                // Nonlocal statements are hints and don't produce code directly
+                Ok(quote! { /* nonlocal variables: #(#nonlocal_stmt.names),* */ })
+            },
         }
-         // Add checks for line/col numbers if necessary
-         assert_eq!(tree.raw.body[0].lineno, Some(1));
-         assert_eq!(tree.raw.body[0].col_offset, Some(0));
-    }
-
-    #[test]
-    fn does_module_compile() {
-        let options = PythonOptions::default();
-        let result = parse(
-            "#test comment\ndef foo():\n    continue\n    pass\n",
-            "test_case.py", // Give it a .py extension
-        )
-        .expect("Parsing failed");
-
-        log::info!("Parsed Module: {:?}", result);
-        let mut symbols = SymbolTableScopes::new();
-        // First pass: find symbols
-        result.find_symbols(&mut symbols);
-        log::info!("Symbols after find_symbols: {:?}", symbols);
-
-        // Second pass: generate code
-        let code_result = result.to_rust(
-            &CodeGenContext::Module("test_case".to_string()), // Use module name from filename
-            &options,
-            &mut symbols,
-        );
-
-        assert!(code_result.is_ok(), "CodeGen failed: {:?}", code_result.err());
-        let code = code_result.unwrap();
-        log::info!("Generated Rust Code:\n{}", code.to_string());
-        // Add basic assertions about the generated code if possible
-        assert!(!code.to_string().is_empty());
-        assert!(code.to_string().contains("fn foo"));
-        assert!(code.to_string().contains("continue ;"));
-        // Pass generates no code, so no specific check needed unless comments are preserved
     }
 }

@@ -1,13 +1,18 @@
+use anyhow::Result;
+use pyo3::prelude::*;
+use serde::{Deserialize, Serialize};
 use proc_macro2::TokenStream;
-use pyo3::FromPyObject;
 use quote::quote;
 
-use crate::{CodeGen, CodeGenContext, ExprType, PythonOptions, SymbolTableScopes};
+use crate::{
+    ast::dump::dump,
+    codegen::{CodeGen, CodeGenContext, python_options::PythonOptions},
+    symbols::SymbolTableScopes,
+};
 
-use serde::{Deserialize, Serialize};
+use super::expression::ExprType;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-//#[pyo3(transparent)]
 pub struct Await {
     pub value: Box<ExprType>,
 }
@@ -21,7 +26,7 @@ impl FromPyObject<'_> for Await {
     }
 }
 
-impl<'a> CodeGen for Await {
+impl CodeGen for Await {
     type Context = CodeGenContext;
     type Options = PythonOptions;
     type SymbolTable = SymbolTableScopes;
@@ -31,11 +36,10 @@ impl<'a> CodeGen for Await {
         _ctx: Self::Context,
         _options: Self::Options,
         _symbols: Self::SymbolTable,
-    ) -> Result<TokenStream, Box<dyn std::error::Error>> {
+    ) -> Result<TokenStream> {
         let value = self
             .value
-            .to_rust(_ctx, _options, _symbols)
-            .expect("Failed to convert async function to rust");
-        Ok(quote!(#value.await))
+            .to_rust(_ctx, _options, _symbols)?;
+        Ok(quote! { #value.await })
     }
 }

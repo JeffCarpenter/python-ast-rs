@@ -1,43 +1,68 @@
 use std::collections::VecDeque;
 
-use log::debug;
+use anyhow::Result;
+use log::{debug, error};
 use pyo3::{
     prelude::*,
-    types::{PyList, PyString},
-    PyResult,
+    types::{PyList},
+    FromPyObject,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     ast::dump::dump,
-    ast::node::Node,
-    parser::parse,
-    pytypes::{Literal, PyListLike},
+    pytypes::{ListLike},
 };
 
-use super::{
-    bool_ops::{BoolOp, BoolOps},
-    bin_ops::{BinOp, BinOps},
-    compare::{Compare, Compares},
-    constant::{Constant, try_bool, try_bytes, try_float, try_int, try_option, try_string},
-    name::{Name, Identifier},
+use crate::ast::tree::{
+    bool_ops::BoolOp,
+    bin_ops::BinOp,
+    compare::Compare,
+    constant::Constant,
+    name::Name,
     named_expression::NamedExpr,
-    unary_op::{Ops, UnaryOp},
+    unary_op::UnaryOp,
+    attribute::Attribute,
     call::Call,
 };
+use crate::ast::tree::statement::Statement;
+use crate::ast::tree::keyword::Keyword;
+use crate::ast::tree::comprehension::Comprehension;
+use crate::ast::tree::arguments::Arguments;
+use crate::ast::tree::parameters::Parameter;
 
-#[derive(Debug, PartialEq, Clone)]
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct Container<T>(pub crate::pytypes::List<T>);
 
 impl<T> Container<T> {
     pub fn new() -> Self {
         Self(VecDeque::new())
     }
+
+    pub fn append(&mut self, value: T) {
+        self.0.push_back(Box::new(value));
+    }
+
+    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, Box<T>> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index < self.0.len() {
+            self.0.get(index).map(|boxed_value| boxed_value.as_ref())
+        } else {
+            None
+        }
+    }
 }
 
 
-impl<'a, 'p, T> FromPyObject<'a> for Container<crate::pytypes::List<ExprType>>
-where
-    T: FromPyObject<'a> + std::fmt::Debug,
+impl<'a, 'p> FromPyObject<'a> for Container<ExprType>
 {
     fn extract(ob: &'a PyAny) -> PyResult<Self> {
         let list = crate::pytypes::List::<ExprType>::new();
@@ -49,25 +74,33 @@ where
                 match ExprType::extract(item) {
                     Ok(expr_type) => list.append(expr_type),
                     Err(e) => {
-                        log::error!("Failed to extract ExprType from list item: {}", e);
-                        return Err(e); // Or handle the error as needed
+                        error!("Failed to extract ExprType from PyList item: {}", e);
+                        return Err(e);
                     }
                 }
             }
+            Ok(Self(list))
         } else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "Expected PyList, but got {:?}",
-                ob
-            )));
+            Err(pyo3::exceptions::PyTypeError::new_err(
+                "Expected a PyList",
+            ))
         }
-
-
-        Ok(Self(list))
     }
 }
 
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Expr {
+    #[serde(flatten)]
+    pub value: ExprType,
+
+    pub lineno: Option<usize>,
+    pub col_offset: Option<usize>,
+    pub end_lineno: Option<usize>,
+    pub end_col_offset: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum ExprType {
     BoolOp(BoolOp),
     NamedExpr(NamedExpr),
@@ -78,110 +111,175 @@ pub enum ExprType {
     Call(Call),
     Compare(Compare),
     Name(Name),
-    List(Container<crate::pytypes::List<ExprType>>), // Changed to use Container
-    Tuple(Container<crate::pytypes::List<ExprType>>), // Changed to use Container
-    // Starred(Starred),
-    // ListComp(ListComp),
-    // TupleComp(TupleComp),
-    // GeneratorExp(GeneratorExp),
-    // Await(Await),
-    // Yield(Yield),
-    // YieldFrom(YieldFrom),
-    // Lambda(Lamda),
-    // IfExp(IfExp),
-    // Dict(Dict),
-    // Set(Set),
-    // ListComp(ListComp),
-    // SetComp(SetComp),
-    // DictComp(DictComp),
-    // ClassDef(ClassDef),
-    // FunctionDef(FunctionDef),
-    // AsyncFunctionDef(AsyncFunctionDef),
-    // AnnAssign(AnnAssign),
-    // Assert(Assert),
-    // Assign(Assign),
-    // AugAssign(AugAssign),
-    // Break(Break),
-    // ClassDef(ClassDef),
-    // Continue(Continue),
-    // Delete(Delete),
-    // ExceptHandler(ExceptHandler),
-    // For(For),
-    // AsyncFor(AsyncFor),
-    // FunctionDef(FunctionDef),
-    // AsyncFunctionDef(AsyncFunctionDef),
-    // Global(Global),
-    // If(If),
-    // Import(Import),
-    // ImportFrom(ImportFrom),
-    // Nonlocal(Nonlocal),
-    // Pass(Pass),
-    // Raise(Raise),
-    // Return(Return),
-    // Try(Try),
-    // While(While),
-    // With(With),
-    // AsyncWith(AsyncWith),
-    // match_(Match),
-    // match_case(MatchCase),
-    // type_ignore(TypeIgnore),
-    // interactive(Interactive),
-    // module(Module),
-    // expression(Expression),
-    // function_type(FunctionType),
-    // comment(Comment),
-    // module(Module),
-    // alias(Alias),
-    // withitem(WithItem),
-    // comprehension(Comprehension),
-    // excepthandler(Excepthandler),
-    // arguments(Arguments),
-    // arg(Arg),
-    // keyword(Keyword),
-    // cmpop(CmpOp),
-    // unaryop(UnaryOp),
-    // boolop(BoolOp),
-    // operator(Operator),
-    // mod(Mod),
-    // stmt(Stmt),
-    // expr_context(ExprContext),
-    // slice(Slice),
-    // boolop(Boolop),
-    // excepthandler(Excepthandler),
-    // mod(Mod),
-    // stmt(Stmt),
-    // identifier(Identifier),
-    // string(String),
-    // bytes(Bytes),
-    // object(Object),
-    // singleton(Singleton),
-    // constant(Constant),
-    // attribute(Attribute),
-    // value(Value),
-    // target(Target),
-    // context_expr(ContextExpr),
-    // iterable(Iterable),
-    // body(Body),
-    // orelse(Orelse),
-    // finalbody(Finalbody),
-    // decorator_list(DecoratorList),
-    // returns(Returns),
-    // type_comment(TypeComment),
-    // type_params(TypeParams),
-    // Param(Param),
-    // Pattern(Pattern),
-    // MatchValue(MatchValue),
-    // MatchSingleton(MatchSingleton),
-    // MatchSequence(MatchSequence),
-    // MatchMapping(MatchMapping),
-    // MatchClass(MatchClass),
-    // MatchStar(MatchStar),
-    // MatchAs(MatchAs),
-    // MatchOr(MatchOr),
-    // Kwarghandler(Kwarghandler),
-    // Vararg(Vararg),
-    // Kwarg(Kwarg),
+    List(List),
+    Tuple(Tuple),
+    Await(Await),
+    IfExp(IfExp),
+    Starred(Starred),
+    Yield(Yield),
+    YieldFrom(YieldFrom),
+    Dict(Dict),
+    Set(Set),
+    ListComp(ListComp),
+    SetComp(SetComp),
+    DictComp(DictComp),
+    GeneratorExp(GeneratorExp),
+    Class(Class),
+    Function(Function),
+    Lambda(Lambda),
+    String(StringExpr),
+    Bytes(BytesExpr),
+    Number(NumberExpr),
+    #[default]
+    None,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct List {
+    pub elts: Container<ExprType>,
+    pub ctx: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Tuple {
+    pub elts: Container<ExprType>,
+    pub ctx: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Await {
+    pub value: Box<ExprType>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct IfExp {
+    pub test: Box<ExprType>,
+    pub body: Box<ExprType>,
+    pub orelse: Box<ExprType>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Starred {
+    pub value: Box<ExprType>,
+    pub ctx: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Yield {
+    pub value: Option<Box<ExprType>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct YieldFrom {
+    pub value: Box<ExprType>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Dict {
+    pub keys: Container<ExprType>,
+    pub values: Container<ExprType>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Set {
+    pub elts: Container<ExprType>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct ListComp {
+    pub elt: Box<ExprType>,
+    pub generators: Container<Comprehension>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct SetComp {
+    pub elt: Box<ExprType>,
+    pub generators: Container<Comprehension>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct DictComp {
+    pub key: Box<ExprType>,
+    pub value: Box<ExprType>,
+    pub generators: Container<Comprehension>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct GeneratorExp {
+    pub elt: Box<ExprType>,
+    pub generators: Container<Comprehension>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Class {
+    pub bases: Container<ExprType>,
+    pub keywords: Container<Keyword>,
+    pub body: Container<Statement>,
+    pub decorator_list: Container<ExprType>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Function {
+    pub args: Arguments,
+    pub body: Container<Statement>,
+    pub decorator_list: Container<ExprType>,
+    pub returns: Option<Box<ExprType>>,
+    pub type_comment: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Lambda {
+    pub args: Arguments,
+    pub body: Box<ExprType>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct StringExpr {
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct BytesExpr {
+    pub value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct NumberExpr {
+    pub value: String, // Could be int or float, using String for simplicity
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Comprehension {
+    pub target: Expr,
+    pub iter: Expr,
+    pub ifs: Container<ExprType>,
+    pub is_async: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Keyword {
+    pub arg: Option<String>,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Arguments {
+    pub posonlyargs: Container<Parameter>,
+    pub args: Container<Parameter>,
+    pub vararg: Option<Parameter>,
+    pub kwonlyargs: Container<Parameter>,
+    pub kw_defaults: Container<ExprType>, // Changed from Option<Expr> to ExprType
+    pub kwarg: Option<Parameter>,
+    pub defaults: Container<ExprType>, // Changed from Option<Expr> to ExprType
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Parameter {
+    pub arg: String,
+    pub annotation: Option<Expr>,
+    pub type_comment: Option<String>,
+}
+
 
 impl<'a> FromPyObject<'a> for ExprType {
     fn extract(ob: &'a PyAny) -> PyResult<Self> {
@@ -195,8 +293,6 @@ impl<'a> FromPyObject<'a> for ExprType {
             .as_str(),
         );
 
-        log::debug!("expr_type: {}", expr_type);
-
         match expr_type.as_ref() {
             "BoolOp" => Ok(ExprType::BoolOp(BoolOp::extract(ob)?)),
             "NamedExpr" => Ok(ExprType::NamedExpr(NamedExpr::extract(ob)?)),
@@ -207,28 +303,43 @@ impl<'a> FromPyObject<'a> for ExprType {
             "Call" => Ok(ExprType::Call(Call::extract(ob)?)),
             "Compare" => Ok(ExprType::Compare(Compare::extract(ob)?)),
             "Name" => Ok(ExprType::Name(Name::extract(ob)?)),
-            "List" => Ok(ExprType::List(Container::<crate::pytypes::List<ExprType>>::extract(ob)?)), // Use Container here
-            "Tuple" => Ok(ExprType::Tuple(Container::<crate::pytypes::List<ExprType>>::extract(ob)?)), // Use Container here
-
-            // ... handle other ExprType variants
+            "List" => Ok(ExprType::List(List::extract(ob)?)),
+            "Tuple" => Ok(ExprType::Tuple(Tuple::extract(ob)?)),
+            "Await" => Ok(ExprType::Await(Await::extract(ob)?)),
+            "IfExp" => Ok(ExprType::IfExp(IfExp::extract(ob)?)),
+            "Starred" => Ok(ExprType::Starred(Starred::extract(ob)?)),
+            "Yield" => Ok(ExprType::Yield(Yield::extract(ob)?)),
+            "YieldFrom" => Ok(ExprType::YieldFrom(YieldFrom::extract(ob)?)),
+            "Dict" => Ok(ExprType::Dict(Dict::extract(ob)?)),
+            "Set" => Ok(ExprType::Set(Set::extract(ob)?)),
+            "ListComp" => Ok(ExprType::ListComp(ListComp::extract(ob)?)),
+            "SetComp" => Ok(ExprType::SetComp(SetComp::extract(ob)?)),
+            "DictComp" => Ok(ExprType::DictComp(DictComp::extract(ob)?)),
+            "GeneratorExp" => Ok(ExprType::GeneratorExp(GeneratorExp::extract(ob)?)),
+            "ClassDef" => Ok(ExprType::Class(Class::extract(ob)?)), // Assuming ClassDef maps to Class
+            "FunctionDef" => Ok(ExprType::Function(Function::extract(ob)?)), // Assuming FunctionDef maps to Function
+            "Lambda" => Ok(ExprType::Lambda(Lambda::extract(ob)?)),
+            "str" => {
+                let value: String = ob.extract()?;
+                Ok(ExprType::String(StringExpr{value}))
+            },
+            "bytes" => {
+                let value: Vec<u8> = ob.extract()?;
+                Ok(ExprType::Bytes(BytesExpr{value}))
+            },
+            "int" | "float" => {
+                let value: String = ob.str()?.extract()?;
+                Ok(ExprType::Number(NumberExpr{value}))
+            },
+            "NoneType" => Ok(ExprType::None),
             _ => {
-                let err_msg = format!("Unimplemented ExprType: {} - {}", expr_type, dump(ob, None)?);
+                let err_msg = format!("Unimplemented expression type: {}", expr_type);
                 Err(pyo3::exceptions::PyValueError::new_err(
                     ob.error_message("<unknown>", err_msg),
                 ))
             }
         }
     }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Expr {
-    pub value: ExprType,
-    pub ctx: Option<String>,
-    pub lineno: Option<usize>,
-    pub col_offset: Option<usize>,
-    pub end_lineno: Option<usize>,
-    pub end_col_offset: Option<usize>,
 }
 
 impl<'a> FromPyObject<'a> for Expr {
@@ -240,55 +351,124 @@ impl<'a> FromPyObject<'a> for Expr {
             .expect(ob.error_message("<unknown>", err_msg.as_str()).as_str());
         log::debug!("ob_value: {}", dump(ob_value, None)?);
 
-        // The context is Load, Store, etc. For some types of expressions such as Constants, it does not exist.
+        // The context is Load, Store, etc. For some types of expressions such as Constants, it doesn't exist.
         let ctx: Option<String> = if let Ok(pyany) = ob_value.getattr("ctx") {
-            let ctx_type = pyany.get_type().name().expect(
-                ob.error_message(
-                    "<unknown>",
-                    format!("extracting type name {:?} in expression context", dump(ob, None)),
-                )
-                .as_str(),
-            );
-            Some(ctx_type.to_string())
+            pyany.get_type().name().ok().map(|s| s.to_string())
         } else {
             None
         };
 
-
-        let value = ExprType::extract(ob_value)?;
-
-        let lineno = ob.getattr("lineno").ok().and_then(|ln| ln.extract().ok());
-        let col_offset = ob.getattr("col_offset").ok().and_then(|co| co.extract().ok());
-        let end_lineno = ob.getattr("end_lineno").ok().and_then(|eln| eln.extract().ok());
-        let end_col_offset = ob.getattr("end_col_offset").ok().and_then(|eco| eco.extract().ok());
-
-
-        Ok(Expr {
-            value,
-            ctx,
-            lineno,
-            col_offset,
-            end_lineno,
-            end_col_offset,
+        Ok(Self {
+            value: ExprType::extract(ob_value)?,
+            lineno: ob.lineno(),
+            col_offset: ob.col_offset(),
+            end_lineno: ob.end_lineno(),
+            end_col_offset: ob.end_col_offset(),
         })
     }
 }
 
+use crate::codegen::CodeGen;
+use crate::codegen::python_options::PythonOptions;
+use crate::codegen::CodeGenContext;
+use crate::symbols::SymbolTableScopes;
+use proc_macro2::TokenStream;
 
-impl Node for Expr {
-    fn lineno(&self) -> Option<usize> {
-        self.lineno
+impl CodeGen for Expr {
+    type Context = CodeGenContext;
+    type Options = PythonOptions;
+    type SymbolTable = SymbolTableScopes;
+
+    fn to_rust(
+        self,
+        ctx: Self::Context,
+        options: Self::Options,
+        symbols: Self::SymbolTable,
+    ) -> Result<TokenStream> {
+        self.value.to_rust(ctx, options, symbols)
     }
 
-    fn col_offset(&self) -> Option<usize> {
-        self.col_offset
+    fn find_symbols(self, symbols: Self::SymbolTable) -> Self::SymbolTable {
+        self.value.find_symbols(symbols)
+    }
+}
+
+
+impl CodeGen for ExprType {
+    type Context = CodeGenContext;
+    type Options = PythonOptions;
+    type SymbolTable = SymbolTableScopes;
+
+    fn to_rust(
+        self,
+        ctx: Self::Context,
+        options: Self::Options,
+        symbols: Self::SymbolTable,
+    ) -> Result<TokenStream> {
+        match self {
+            ExprType::BoolOp(op) => op.to_rust(ctx, options, symbols),
+            ExprType::NamedExpr(named_expr) => named_expr.to_rust(ctx, options, symbols),
+            ExprType::BinOp(op) => op.to_rust(ctx, options, symbols),
+            ExprType::UnaryOp(op) => op.to_rust(ctx, options, symbols),
+            ExprType::Constant(constant) => constant.to_rust(ctx, options, symbols),
+            ExprType::Attribute(attribute) => attribute.to_rust(ctx, options, symbols),
+            ExprType::Call(call) => call.to_rust(ctx, options, symbols),
+            ExprType::Compare(compare) => compare.to_rust(ctx, options, symbols),
+            ExprType::Name(name) => name.to_rust(ctx, options, symbols),
+            ExprType::List(list) => list.to_rust(ctx, options, symbols),
+            ExprType::Tuple(tuple) => tuple.to_rust(ctx, options, symbols),
+            ExprType::Await(await_expr) => await_expr.to_rust(ctx, options, symbols),
+            ExprType::IfExp(if_exp) => if_exp.to_rust(ctx, options, symbols),
+            ExprType::Starred(starred) => starred.to_rust(ctx, options, symbols),
+            ExprType::Yield(yield_expr) => yield_expr.to_rust(ctx, options, symbols),
+            ExprType::YieldFrom(yield_from) => yield_from.to_rust(ctx, options, symbols),
+            ExprType::Dict(dict) => dict.to_rust(ctx, options, symbols),
+            ExprType::Set(set) => set.to_rust(ctx, options, symbols),
+            ExprType::ListComp(list_comp) => list_comp.to_rust(ctx, options, symbols),
+            ExprType::SetComp(set_comp) => set_comp.to_rust(ctx, options, symbols),
+            ExprType::DictComp(dict_comp) => dict_comp.to_rust(ctx, options, symbols),
+            ExprType::GeneratorExp(generator_exp) => generator_exp.to_rust(ctx, options, symbols),
+            ExprType::Class(class_def) => class_def.to_rust(ctx, options, symbols),
+            ExprType::Function(function_def) => function_def.to_rust(ctx, options, symbols),
+            ExprType::Lambda(lambda) => lambda.to_rust(ctx, options, symbols),
+            ExprType::String(string_expr) => string_expr.to_rust(ctx, options, symbols),
+            ExprType::Bytes(bytes_expr) => bytes_expr.to_rust(ctx, options, symbols),
+            ExprType::Number(number_expr) => number_expr.to_rust(ctx, options, symbols),
+            ExprType::None => Ok(quote! { None }), // Handle None explicitly
+        }
     }
 
-    fn end_lineno(&self) -> Option<usize> {
-        self.end_lineno
-    }
-
-    fn end_col_offset(&self) -> Option<usize> {
-        self.end_col_offset
+    fn find_symbols(self, symbols: Self::SymbolTable) -> Self::SymbolTable {
+        match self {
+            ExprType::BoolOp(op) => op.find_symbols(symbols),
+            ExprType::NamedExpr(named_expr) => named_expr.find_symbols(symbols),
+            ExprType::BinOp(op) => op.find_symbols(symbols),
+            ExprType::UnaryOp(op) => op.find_symbols(symbols),
+            ExprType::Constant(_) => symbols, // Constants don't introduce new symbols
+            ExprType::Attribute(_) => symbols, // Attributes don't introduce new symbols
+            ExprType::Call(call) => call.find_symbols(symbols),
+            ExprType::Compare(compare) => compare.find_symbols(symbols),
+            ExprType::Name(_) => symbols,    // Names don't introduce new symbols at this level
+            ExprType::List(_) => symbols,    // Lists don't introduce new symbols at this level
+            ExprType::Tuple(_) => symbols,   // Tuples don't introduce new symbols at this level
+            ExprType::Await(_) => symbols,   // Await doesn't introduce new symbols at this level
+            ExprType::IfExp(_) => symbols,   // IfExp doesn't introduce new symbols at this level
+            ExprType::Starred(_) => symbols, // Starred doesn't introduce new symbols at this level
+            ExprType::Yield(_) => symbols,   // Yield doesn't introduce new symbols at this level
+            ExprType::YieldFrom(_) => symbols, // YieldFrom doesn't introduce new symbols at this level
+            ExprType::Dict(_) => symbols,    // Dict doesn't introduce new symbols at this level
+            ExprType::Set(_) => symbols,     // Set doesn't introduce new symbols at this level
+            ExprType::ListComp(_) => symbols, // ListComp doesn't introduce new symbols at this level
+            ExprType::SetComp(_) => symbols,  // SetComp doesn't introduce new symbols at this level
+            ExprType::DictComp(_) => symbols, // DictComp doesn't introduce new symbols at this level
+            ExprType::GeneratorExp(_) => symbols, // GeneratorExp doesn't introduce new symbols at this level
+            ExprType::Class(_) => symbols,    // ClassDef doesn't introduce new symbols at this level (ClassDef statement does)
+            ExprType::Function(_) => symbols, // FunctionDef doesn't introduce new symbols at this level (FunctionDef statement does)
+            ExprType::Lambda(_) => symbols,  // Lambda doesn't introduce new symbols at this level
+            ExprType::String(_) => symbols,  // StringExpr doesn't introduce new symbols
+            ExprType::Bytes(_) => symbols,   // BytesExpr doesn't introduce new symbols
+            ExprType::Number(_) => symbols,  // NumberExpr doesn't introduce new symbols
+            ExprType::None => symbols,       // None doesn't introduce new symbols
+        }
     }
 }
