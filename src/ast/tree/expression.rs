@@ -132,10 +132,12 @@ impl<'a> FromPyObject<'a> for ExprType {
                 Ok(Self::Constant(c))
             }
             "List" => {
-                //let list = crate::pytypes::List::<ExprType>::new();
-                let list: Vec<ExprType> = ob
-                    .extract()
-                    .expect(format!("extracting List {}", dump(ob, None)?).as_str());
+                let py_list = ob.downcast::<pyo3::types::PyList>()
+                    .expect(format!("Failed to downcast to PyList for List: {}", dump(ob, None)?).as_str());
+                let mut list: Vec<ExprType> = Vec::new();
+                for item in py_list.iter() {
+                    list.push(ExprType::extract(item)?);
+                }
                 Ok(Self::List(list))
             }
             "Name" => {
@@ -360,7 +362,12 @@ impl<'a> FromPyObject<'a> for Expr {
             }
             "List" => {
                 //let list = crate::pytypes::List::<ExprType>::new();
-                let list: Vec<ExprType> = ob.extract().expect("extracting List");
+                let py_list = ob.downcast::<pyo3::types::PyList>()
+                    .expect(format!("Failed to downcast to PyList for List in Expr: {}", dump(ob, None)?).as_str());
+                let mut list: Vec<ExprType> = Vec::new();
+                for item in py_list.iter() {
+                    list.push(ExprType::extract(item)?);
+                }
                 r.value = ExprType::List(list);
                 Ok(r)
             }
