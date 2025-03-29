@@ -1,68 +1,186 @@
-use proc_macro2::TokenStream;
-use pyo3::{FromPyObject, PyAny, PyResult};
-use quote::quote;
-use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
-use crate::{
-    dump, Attribute, Await, BinOp, BoolOp, Call, CodeGen, CodeGenContext, Compare, Constant, Error,
-    Name, NamedExpr, Node, PythonOptions, SymbolTableScopes, UnaryOp,
+use log::debug;
+use pyo3::{
+    prelude::*,
+    types::{PyList, PyString},
+    PyResult,
 };
 
-/// Mostly this shouldn't be used, but it exists so that we don't have to manually implement FromPyObject on all of ExprType
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[repr(transparent)]
-pub struct Container<T>(pub T);
+use crate::{
+    ast::dump::dump,
+    ast::node::Node,
+    parser::parse,
+    pytypes::{Literal, PyListLike},
+};
 
-impl<'a> FromPyObject<'a> for Container<crate::pytypes::List<ExprType>> {
+use super::{
+    bool_ops::{BoolOp, BoolOps},
+    bin_ops::{BinOp, BinOps},
+    compare::{Compare, Compares},
+    constant::{Constant, try_bool, try_bytes, try_float, try_int, try_option, try_string},
+    name::{Name, Identifier},
+    named_expression::NamedExpr,
+    unary_op::{Ops, UnaryOp},
+    call::Call,
+};
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Container<T>(pub crate::pytypes::List<T>);
+
+impl<T> Container<T> {
+    pub fn new() -> Self {
+        Self(VecDeque::new())
+    }
+}
+
+
+impl<'a, 'p, T> FromPyObject<'a> for Container<crate::pytypes::List<ExprType>>
+where
+    T: FromPyObject<'a> + std::fmt::Debug,
+{
     fn extract(ob: &'a PyAny) -> PyResult<Self> {
         let list = crate::pytypes::List::<ExprType>::new();
 
         log::debug!("pylist: {}", dump(ob, Some(4))?);
-        let _converted_list: Vec<&PyAny> = ob.extract()?;
-        for item in ob.iter().expect("extracting list") {
-            log::debug!("item: {:?}", item);
+        // Check if the object is a PyList
+        if let Ok(py_list) = ob.downcast::<PyList>() {
+            for item in py_list.iter() {
+                match ExprType::extract(item) {
+                    Ok(expr_type) => list.append(expr_type),
+                    Err(e) => {
+                        log::error!("Failed to extract ExprType from list item: {}", e);
+                        return Err(e); // Or handle the error as needed
+                    }
+                }
+            }
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "Expected PyList, but got {:?}",
+                ob
+            )));
         }
+
 
         Ok(Self(list))
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum ExprType {
     BoolOp(BoolOp),
     NamedExpr(NamedExpr),
     BinOp(BinOp),
     UnaryOp(UnaryOp),
-    /*Lambda(Lamda),
-    IfExp(IfExp),
-    Dict(Dict),
-    Set(Set),
-    ListComp(ListComp),
-    SetComp(SetComp),
-    DictComp(DictComp),
-    GeneratorExp(),*/
-    Await(Await),
-    /*Yield(),
-    YieldFrom(),*/
-    Compare(Compare),
-    Call(Call),
-    /*FormattedValue(),
-    JoinedStr(),*/
     Constant(Constant),
-
-    /// These can appear in a few places, such as the left side of an assignment.
-    Attribute(Attribute), /*
-                          Subscript(),
-                          Starred(),*/
+    Attribute(Attribute),
+    Call(Call),
+    Compare(Compare),
     Name(Name),
-    List(Vec<ExprType>),
-    /*Tuple(),
-    Slice(),*/
-    NoneType(Constant),
-
-    Unimplemented(String),
-    #[default]
-    Unknown,
+    List(Container<crate::pytypes::List<ExprType>>), // Changed to use Container
+    Tuple(Container<crate::pytypes::List<ExprType>>), // Changed to use Container
+    // Starred(Starred),
+    // ListComp(ListComp),
+    // TupleComp(TupleComp),
+    // GeneratorExp(GeneratorExp),
+    // Await(Await),
+    // Yield(Yield),
+    // YieldFrom(YieldFrom),
+    // Lambda(Lamda),
+    // IfExp(IfExp),
+    // Dict(Dict),
+    // Set(Set),
+    // ListComp(ListComp),
+    // SetComp(SetComp),
+    // DictComp(DictComp),
+    // ClassDef(ClassDef),
+    // FunctionDef(FunctionDef),
+    // AsyncFunctionDef(AsyncFunctionDef),
+    // AnnAssign(AnnAssign),
+    // Assert(Assert),
+    // Assign(Assign),
+    // AugAssign(AugAssign),
+    // Break(Break),
+    // ClassDef(ClassDef),
+    // Continue(Continue),
+    // Delete(Delete),
+    // ExceptHandler(ExceptHandler),
+    // For(For),
+    // AsyncFor(AsyncFor),
+    // FunctionDef(FunctionDef),
+    // AsyncFunctionDef(AsyncFunctionDef),
+    // Global(Global),
+    // If(If),
+    // Import(Import),
+    // ImportFrom(ImportFrom),
+    // Nonlocal(Nonlocal),
+    // Pass(Pass),
+    // Raise(Raise),
+    // Return(Return),
+    // Try(Try),
+    // While(While),
+    // With(With),
+    // AsyncWith(AsyncWith),
+    // match_(Match),
+    // match_case(MatchCase),
+    // type_ignore(TypeIgnore),
+    // interactive(Interactive),
+    // module(Module),
+    // expression(Expression),
+    // function_type(FunctionType),
+    // comment(Comment),
+    // module(Module),
+    // alias(Alias),
+    // withitem(WithItem),
+    // comprehension(Comprehension),
+    // excepthandler(Excepthandler),
+    // arguments(Arguments),
+    // arg(Arg),
+    // keyword(Keyword),
+    // cmpop(CmpOp),
+    // unaryop(UnaryOp),
+    // boolop(BoolOp),
+    // operator(Operator),
+    // mod(Mod),
+    // stmt(Stmt),
+    // expr_context(ExprContext),
+    // slice(Slice),
+    // boolop(Boolop),
+    // excepthandler(Excepthandler),
+    // mod(Mod),
+    // stmt(Stmt),
+    // identifier(Identifier),
+    // string(String),
+    // bytes(Bytes),
+    // object(Object),
+    // singleton(Singleton),
+    // constant(Constant),
+    // attribute(Attribute),
+    // value(Value),
+    // target(Target),
+    // context_expr(ContextExpr),
+    // iterable(Iterable),
+    // body(Body),
+    // orelse(Orelse),
+    // finalbody(Finalbody),
+    // decorator_list(DecoratorList),
+    // returns(Returns),
+    // type_comment(TypeComment),
+    // type_params(TypeParams),
+    // Param(Param),
+    // Pattern(Pattern),
+    // MatchValue(MatchValue),
+    // MatchSingleton(MatchSingleton),
+    // MatchSequence(MatchSequence),
+    // MatchMapping(MatchMapping),
+    // MatchClass(MatchClass),
+    // MatchStar(MatchStar),
+    // MatchAs(MatchAs),
+    // MatchOr(MatchOr),
+    // Kwarghandler(Kwarghandler),
+    // Vararg(Vararg),
+    // Kwarg(Kwarg),
 }
 
 impl<'a> FromPyObject<'a> for ExprType {
@@ -76,160 +194,34 @@ impl<'a> FromPyObject<'a> for ExprType {
             )
             .as_str(),
         );
-        log::debug!("expression type: {}, value: {}", expr_type, dump(ob, None)?);
 
-        let r = match expr_type.as_ref() {
-            "Attribute" => {
-                let a = Attribute::extract(ob).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting Attribute in expression {}", dump(ob, None)?),
-                    )
-                    .as_str(),
-                );
-                Ok(Self::Attribute(a))
-            }
-            "Await" => {
-                //println!("await: {}", dump(ob, None)?);
-                let a = Await::extract(ob).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting await value in expression {}", dump(ob, None)?),
-                    )
-                    .as_str(),
-                );
-                Ok(Self::Await(a))
-            }
-            "Call" => {
-                let et = Call::extract(ob).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("parsing Call expression {}", dump(ob, None)?),
-                    )
-                    .as_str(),
-                );
-                Ok(Self::Call(et))
-            }
-            "Compare" => {
-                let c = Compare::extract(ob).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting Compare in expression {}", dump(ob, None)?),
-                    )
-                    .as_str(),
-                );
-                Ok(Self::Compare(c))
-            }
-            "Constant" => {
-                log::debug!("constant: {}", dump(ob, None)?);
-                let c = Constant::extract(ob).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting Constant in expression {}", dump(ob, None)?),
-                    )
-                    .as_str(),
-                );
-                Ok(Self::Constant(c))
-            }
-            "List" => {
-                let py_list = ob.downcast::<pyo3::types::PyList>()
-                    .expect(format!("Failed to downcast to PyList for List: {}", dump(ob, None)?).as_str());
-                let mut list: Vec<ExprType> = Vec::new();
-                for item in py_list.iter() {
-                    list.push(ExprType::extract(item)?);
-                }
-                Ok(Self::List(list))
-            }
-            "Name" => {
-                let name = Name::extract(ob).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("parsing Name expression {}", dump(ob, None)?),
-                    )
-                    .as_str(),
-                );
-                Ok(Self::Name(name))
-            }
-            "UnaryOp" => {
-                let c = UnaryOp::extract(ob).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting UnaryOp in expression {}", dump(ob, None)?),
-                    )
-                    .as_str(),
-                );
-                Ok(Self::UnaryOp(c))
-            }
-            "BinOp" => {
-                let c = BinOp::extract(ob).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting BinOp in expression {}", dump(ob, None)?),
-                    )
-                    .as_str(),
-                );
-                Ok(Self::BinOp(c))
-            }
+        log::debug!("expr_type: {}", expr_type);
+
+        match expr_type.as_ref() {
+            "BoolOp" => Ok(ExprType::BoolOp(BoolOp::extract(ob)?)),
+            "NamedExpr" => Ok(ExprType::NamedExpr(NamedExpr::extract(ob)?)),
+            "BinOp" => Ok(ExprType::BinOp(BinOp::extract(ob)?)),
+            "UnaryOp" => Ok(ExprType::UnaryOp(UnaryOp::extract(ob)?)),
+            "Constant" => Ok(ExprType::Constant(Constant::extract(ob)?)),
+            "Attribute" => Ok(ExprType::Attribute(Attribute::extract(ob)?)),
+            "Call" => Ok(ExprType::Call(Call::extract(ob)?)),
+            "Compare" => Ok(ExprType::Compare(Compare::extract(ob)?)),
+            "Name" => Ok(ExprType::Name(Name::extract(ob)?)),
+            "List" => Ok(ExprType::List(Container::<crate::pytypes::List<ExprType>>::extract(ob)?)), // Use Container here
+            "Tuple" => Ok(ExprType::Tuple(Container::<crate::pytypes::List<ExprType>>::extract(ob)?)), // Use Container here
+
+            // ... handle other ExprType variants
             _ => {
-                let err_msg = format!(
-                    "Unimplemented expression type {}, {}",
-                    expr_type,
-                    dump(ob, None)?
-                );
+                let err_msg = format!("Unimplemented ExprType: {} - {}", expr_type, dump(ob, None)?);
                 Err(pyo3::exceptions::PyValueError::new_err(
-                    ob.error_message("<unknown>", err_msg.as_str()),
+                    ob.error_message("<unknown>", err_msg),
                 ))
-            }
-        };
-        r
-    }
-}
-
-impl<'a> CodeGen for ExprType {
-    type Context = CodeGenContext;
-    type Options = PythonOptions;
-    type SymbolTable = SymbolTableScopes;
-
-    fn to_rust(
-        self,
-        ctx: Self::Context,
-        options: Self::Options,
-        symbols: Self::SymbolTable,
-    ) -> std::result::Result<TokenStream, Box<dyn std::error::Error>> {
-        match self {
-            ExprType::Attribute(attribute) => attribute.to_rust(ctx, options, symbols),
-            ExprType::Await(func) => func.to_rust(ctx, options, symbols),
-            ExprType::BinOp(binop) => binop.to_rust(ctx, options, symbols),
-            ExprType::Call(call) => call.to_rust(ctx, options, symbols),
-            ExprType::Compare(c) => c.to_rust(ctx, options, symbols),
-            ExprType::Constant(c) => c.to_rust(ctx, options, symbols),
-            ExprType::List(l) => {
-                let mut ts = TokenStream::new();
-                for li in l {
-                    let code = li
-                        .clone()
-                        .to_rust(ctx.clone(), options.clone(), symbols.clone())
-                        .expect(format!("Extracting list item {:?}", li).as_str());
-                    ts.extend(code);
-                    ts.extend(quote!(,));
-                }
-                Ok(ts)
-            }
-            ExprType::Name(name) => name.to_rust(ctx, options, symbols),
-            ExprType::NoneType(c) => c.to_rust(ctx, options, symbols),
-            ExprType::UnaryOp(operand) => operand.to_rust(ctx, options, symbols),
-
-            _ => {
-                let error = Error::ExprTypeNotYetImplemented(self);
-                Err(error.into())
             }
         }
     }
 }
 
-/// An Expr only contains a single value key, which leads to the actual expression,
-/// which is one of several types.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Expr {
     pub value: ExprType,
     pub ctx: Option<String>,
@@ -250,205 +242,38 @@ impl<'a> FromPyObject<'a> for Expr {
 
         // The context is Load, Store, etc. For some types of expressions such as Constants, it does not exist.
         let ctx: Option<String> = if let Ok(pyany) = ob_value.getattr("ctx") {
-            pyany.get_type().extract().unwrap_or_default()
+            let ctx_type = pyany.get_type().name().expect(
+                ob.error_message(
+                    "<unknown>",
+                    format!("extracting type name {:?} in expression context", dump(ob, None)),
+                )
+                .as_str(),
+            );
+            Some(ctx_type.to_string())
         } else {
             None
         };
 
-        let mut r = Self {
-            value: ExprType::Unknown,
-            ctx: ctx,
-            lineno: ob.lineno(),
-            col_offset: ob.col_offset(),
-            end_lineno: ob.end_lineno(),
-            end_col_offset: ob.end_col_offset(),
-        };
 
-        let expr_type = ob_value.get_type().name().expect(
-            ob.error_message(
-                "<unknown>",
-                format!("extracting type name {:?} in expression", ob_value),
-            )
-            .as_str(),
-        );
-        log::debug!(
-            "expression type: {}, value: {}",
-            expr_type,
-            dump(ob_value, None)?
-        );
-        match expr_type.as_ref() {
-            "Atribute" => {
-                let a = Attribute::extract(ob_value).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting BinOp in expression {:?}", dump(ob_value, None)?),
-                    )
-                    .as_str(),
-                );
-                r.value = ExprType::Attribute(a);
-                Ok(r)
-            }
-            "Await" => {
-                let a = Await::extract(ob_value).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting BinOp in expression {:?}", dump(ob_value, None)?),
-                    )
-                    .as_str(),
-                );
-                r.value = ExprType::Await(a);
-                Ok(r)
-            }
-            "BinOp" => {
-                let c = BinOp::extract(ob_value).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting BinOp in expression {:?}", dump(ob_value, None)?),
-                    )
-                    .as_str(),
-                );
-                r.value = ExprType::BinOp(c);
-                Ok(r)
-            }
-            "BoolOp" => {
-                let c = BoolOp::extract(ob_value).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("extracting BinOp in expression {:?}", dump(ob_value, None)?),
-                    )
-                    .as_str(),
-                );
-                r.value = ExprType::BoolOp(c);
-                Ok(r)
-            }
-            "Call" => {
-                let et = Call::extract(ob_value).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("parsing Call expression {:?}", ob_value),
-                    )
-                    .as_str(),
-                );
-                r.value = ExprType::Call(et);
-                Ok(r)
-            }
-            "Constant" => {
-                let c = Constant::extract(ob_value).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!(
-                            "extracting Constant in expression {:?}",
-                            dump(ob_value, None)?
-                        ),
-                    )
-                    .as_str(),
-                );
-                r.value = ExprType::Constant(c);
-                Ok(r)
-            }
-            "Compare" => {
-                let c = Compare::extract(ob_value).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!(
-                            "extracting Compare in expression {:?}",
-                            dump(ob_value, None)?
-                        ),
-                    )
-                    .as_str(),
-                );
-                r.value = ExprType::Compare(c);
-                Ok(r)
-            }
-            "List" => {
-                //let list = crate::pytypes::List::<ExprType>::new();
-                let py_list = ob.downcast::<pyo3::types::PyList>()
-                    .expect(format!("Failed to downcast to PyList for List in Expr: {}", dump(ob, None)?).as_str());
-                let mut list: Vec<ExprType> = Vec::new();
-                for item in py_list.iter() {
-                    list.push(ExprType::extract(item)?);
-                }
-                r.value = ExprType::List(list);
-                Ok(r)
-            }
-            "Name" => {
-                let name = Name::extract(ob_value).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!("parsing Call expression {:?}", ob_value),
-                    )
-                    .as_str(),
-                );
-                r.value = ExprType::Name(name);
-                Ok(r)
-            }
-            "UnaryOp" => {
-                let c = UnaryOp::extract(ob_value).expect(
-                    ob.error_message(
-                        "<unknown>",
-                        format!(
-                            "extracting UnaryOp in expression {:?}",
-                            dump(ob_value, None)?
-                        ),
-                    )
-                    .as_str(),
-                );
-                r.value = ExprType::UnaryOp(c);
-                Ok(r)
-            }
-            // In sitations where an expression is optional, we may see a NoneType expressions.
-            "NoneType" => {
-                r.value = ExprType::NoneType(Constant(None));
-                Ok(r)
-            }
-            _ => {
-                let err_msg = format!(
-                    "Unimplemented expression type {}, {}",
-                    expr_type,
-                    dump(ob, None)?
-                );
-                Err(pyo3::exceptions::PyValueError::new_err(
-                    ob.error_message("<unknown>", err_msg.as_str()),
-                ))
-            }
-        }
+        let value = ExprType::extract(ob_value)?;
+
+        let lineno = ob.getattr("lineno").ok().and_then(|ln| ln.extract().ok());
+        let col_offset = ob.getattr("col_offset").ok().and_then(|co| co.extract().ok());
+        let end_lineno = ob.getattr("end_lineno").ok().and_then(|eln| eln.extract().ok());
+        let end_col_offset = ob.getattr("end_col_offset").ok().and_then(|eco| eco.extract().ok());
+
+
+        Ok(Expr {
+            value,
+            ctx,
+            lineno,
+            col_offset,
+            end_lineno,
+            end_col_offset,
+        })
     }
 }
 
-impl CodeGen for Expr {
-    type Context = CodeGenContext;
-    type Options = PythonOptions;
-    type SymbolTable = SymbolTableScopes;
-
-    fn to_rust(
-        self,
-        ctx: Self::Context,
-        options: Self::Options,
-        symbols: Self::SymbolTable,
-    ) -> std::result::Result<TokenStream, Box<dyn std::error::Error>> {
-        let _module_name = match ctx.clone() {
-            CodeGenContext::Module(name) => name,
-            _ => "unknown".to_string(),
-        };
-
-        match self.value.clone() {
-            ExprType::Await(a) => a.to_rust(ctx.clone(), options, symbols),
-            ExprType::BinOp(binop) => binop.to_rust(ctx.clone(), options, symbols),
-            ExprType::BoolOp(boolop) => boolop.to_rust(ctx, options, symbols),
-            ExprType::Call(call) => call.to_rust(ctx.clone(), options, symbols),
-            ExprType::Constant(constant) => constant.to_rust(ctx, options, symbols),
-            ExprType::Compare(compare) => compare.to_rust(ctx, options, symbols),
-            ExprType::UnaryOp(operand) => operand.to_rust(ctx, options, symbols),
-            ExprType::Name(name) => name.to_rust(ctx, options, symbols),
-            // NoneType expressions generate no code.
-            ExprType::NoneType(_c) => Ok(quote!()),
-            _ => {
-                let error = Error::ExprTypeNotYetImplemented(self.value);
-                Err(error.into())
-            }
-        }
-    }
-}
 
 impl Node for Expr {
     fn lineno(&self) -> Option<usize> {
@@ -465,25 +290,5 @@ impl Node for Expr {
 
     fn end_col_offset(&self) -> Option<usize> {
         self.end_col_offset
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn check_call_expression() {
-        let expression = crate::parse("test()", "test.py").unwrap();
-        println!("Python tree: {:#?}", expression);
-        let mut options = PythonOptions::default();
-        options.with_std_python = false;
-        let symbols = SymbolTableScopes::new();
-        let tokens = expression
-            .clone()
-            .to_rust(CodeGenContext::Module("test".to_string()), options, symbols)
-            .unwrap();
-        println!("Rust tokens: {}", tokens.to_string());
-        assert_eq!(tokens.to_string(), quote!(test()).to_string());
     }
 }
